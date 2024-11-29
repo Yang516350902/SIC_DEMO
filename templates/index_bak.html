@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>参数预测 Demo</title>
+    <script src="https://cdn.jsdelivr.net/npm/jquery/dist/jquery.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            line-height: 1.6;
+        }
+
+        h1, h2, h3 {
+            color: #333;
+        }
+
+        button {
+            padding: 8px 12px;
+            font-size: 14px;
+            background-color: #007BFF;
+            color: #fff;
+            border: none;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        input, select {
+            padding: 6px;
+            font-size: 14px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 10px;
+        }
+
+        table th, table td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+
+        table th {
+            background-color: #f4f4f4;
+            font-weight: bold;
+        }
+
+        .highlight-rate {
+            background-color: #e0f7fa;
+            color: #00796b;
+            font-weight: bold;
+        }
+
+        .highlight-angle {
+            background-color: #fff3e0;
+            color: #e65100;
+            font-weight: bold;
+        }
+
+        .output-section {
+            margin-bottom: 30px;
+        }
+
+        .output-section pre {
+            padding: 10px;
+            background-color: #f9f9f9;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            overflow: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>参数预测 Demo</h1>
+
+    <!-- 数据上传 -->
+    <div class="output-section">
+        <h2>数据上传</h2>
+        <form id="upload-form" enctype="multipart/form-data">
+            <input type="file" id="file-input" name="file">
+            <button type="submit">上传数据</button>
+        </form>
+        <div id="data-overview"></div>
+    </div>
+
+    <!-- 数据集划分 -->
+    <div class="output-section">
+        <h2>数据集划分</h2>
+        <label>测试集大小：</label>
+        <input type="number" id="test-size" value="5" min="1">
+        <button id="split-button">更新划分</button>
+        <h3>测试集</h3>
+        <table id="test-set-table"></table>
+        <h3>训练集</h3>
+        <table id="train-set-table"></table>
+    </div>
+
+    <!-- 模型训练 -->
+    <div class="output-section">
+        <h2>模型训练</h2>
+        <label>训练轮数：</label>
+        <input type="number" id="epochs" value="10" min="1">
+        <button id="train-button">开始训练</button>
+        <h2>训练损失曲线</h2>
+        <div id="loss-chart" style="width: 80vw; height: 70vh;"></div>
+<!--        <div id="training-log"></div>-->
+    </div>
+
+    <!-- 测试集选择 -->
+    <div class="output-section">
+        <h2>测试集选择与预测</h2>
+        <label>选择测试集行：</label>
+        <select id="test-row-selector">
+            <option value="">请选择行</option>
+        </select>
+        <button id="auto-fill-button">自动填充</button>
+    </div>
+
+    <!-- 预测 -->
+    <div class="output-section">
+        <h2>预测</h2>
+        <form id="predict-form">
+            <div id="feature-inputs"></div>
+            <button type="submit">提交预测</button>
+        </form>
+        <div id="predict-results"></div>
+    </div>
+
+    <script>
+        const featureOrder = [
+            'Pressure (mT)', 'SRF-C (W)', 'SRF-E (W)', 'BRF (W)', 'SF6 (sccm)',
+            'Ar (sccm)', 'He Pressure (T)', 'Chiller Temp (℃)', 'Time (s)'
+        ];
+
+        let trainSet = [];
+        let testSet = [];
+
+        // 动态生成输入框
+        $(document).ready(function () {
+            const featureInputsDiv = $('#feature-inputs');
+            featureOrder.forEach(feature => {
+                const inputHtml = `
+                    <label>${feature}:</label>
+                    <input type="number" id="${feature.replace(/[^a-zA-Z0-9]/g, '_')}" placeholder="${feature}" required><br>
+                `;
+                featureInputsDiv.append(inputHtml);
+            });
+        });
+
+        // 上传数据
+        $('#upload-form').on('submit', function (e) {
+            e.preventDefault();
+            const formData = new FormData(this);
+
+            $.ajax({
+                url: '/upload_data',
+                type: 'POST',
+                data: formData,
+                processData: false,
+                contentType: false,
+                success: function (response) {
+                    $('#data-overview').text(`文件上传成功！总数据量: ${response.total_rows}`);
+                    renderTable('test-set-table', response.default_test_set);
+                    renderTable('train-set-table', response.default_train_set);
+
+                    testSet = response.default_test_set;
+                    trainSet = response.default_train_set;
+                    populateTestRowSelector(testSet);
+                },
+                error: function () {
+                    $('#data-overview').text('文件上传失败！');
+                }
+            });
+        });
+
+        // 动态划分数据集
+        $('#split-button').on('click', function () {
+            const testSize = parseInt($('#test-size').val(), 10);
+
+            $.ajax({
+                url: '/split_data',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ test_size: testSize }),
+                success: function (response) {
+                    renderTable('test-set-table', response.test_set);
+                    renderTable('train-set-table', response.train_set);
+
+                    testSet = response.test_set;
+                    trainSet = response.train_set;
+                    populateTestRowSelector(testSet);
+                },
+                error: function () {
+                    alert('划分数据集失败，请检查输入！');
+                }
+            });
+        });
+
+        // 开始训练
+        $('#train-button').on('click', function () {
+            const epochs = parseInt($('#epochs').val(), 10);
+
+            $.ajax({
+                url: '/train_model',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ test_set: testSet, train_set: trainSet, epochs: epochs }),
+                success: function (response) {
+                    //$('#training-log').html(response.log.join('<br>'));
+
+                    // 使用 ECharts 渲染损失曲线
+                    const chart = echarts.init(document.getElementById('loss-chart'));
+                    chart.setOption({
+                        title: {
+                            text: '训练损失曲线',
+                            left: 'center'
+                        },
+                        tooltip: {
+                            trigger: 'axis'
+                        },
+                        xAxis: {
+                            type: 'category',
+                            data: Array.from({ length: response.losses.length }, (_, i) => i + 1),
+                            name: 'Epoch'
+                        },
+                        yAxis: {
+                            type: 'value',
+                            name: '值'
+                        },
+                        legend: {
+                            data: ['Loss', 'MAE'],
+                            bottom: 0
+                        },
+                        series: [
+                            {
+                                name: 'Loss',
+                                type: 'line',
+                                data: response.losses,
+                                smooth: true
+                            },
+                            {
+                                name: 'MAE',
+                                type: 'line',
+                                data: response.maes,
+                                smooth: true
+                            }
+                        ]
+                    });
+                },
+                error: function () {
+                    $('#training-log').text('模型训练失败！');
+                }
+            });
+        });
+
+
+        // 填充测试集选择下拉菜单
+        function populateTestRowSelector(testSet) {
+            const selector = $('#test-row-selector');
+            selector.empty();
+            selector.append('<option value="">请选择行</option>');
+            testSet.forEach((row, index) => {
+                const preview = featureOrder.map(feature => `${feature}: ${row[feature] || ''}`).join(', ');
+                selector.append(`<option value="${index}">行 ${index + 1}: ${preview}</option>`);
+            });
+        }
+
+        // 自动填充预测表单
+        $('#test-row-selector').on('change', function () {
+            const rowIndex = $(this).val();
+            if (rowIndex === '') return;
+
+            const rowData = testSet[rowIndex];
+            featureOrder.forEach(feature => {
+                const inputId = feature.replace(/[^a-zA-Z0-9]/g, '_');
+                $(`#${inputId}`).val(rowData[feature]);
+            });
+        });
+
+        // 渲染表格
+        function renderTable(tableId, data) {
+            if (!data || data.length === 0) {
+                $(`#${tableId}`).html('<tr><td>无数据</td></tr>');
+                return;
+            }
+
+            const targetFields = ['Etching Rate (nm/min)', 'Angle (°)'];
+            const columns = Object.keys(data[0]);
+            const sortedColumns = columns.filter(col => !targetFields.includes(col)).concat(targetFields);
+
+            let html = '<tr>';
+            sortedColumns.forEach(column => {
+                html += `<th>${column}</th>`;
+            });
+            html += '</tr>';
+
+            data.forEach(row => {
+                html += '<tr>';
+                sortedColumns.forEach(column => {
+                    let cellClass = '';
+                    if (column === 'Etching Rate (nm/min)') cellClass = 'highlight-rate';
+                    if (column === 'Angle (°)') cellClass = 'highlight-angle';
+                    html += `<td class="${cellClass}">${row[column] || ''}</td>`;
+                });
+                html += '</tr>';
+            });
+
+            $(`#${tableId}`).html(html);
+        }
+
+        // 提交预测
+        $('#predict-form').on('submit', function (e) {
+            e.preventDefault();
+
+            const inputFeatures = featureOrder.map(feature => {
+                const id = feature.replace(/[^a-zA-Z0-9]/g, '_');
+                return parseFloat($(`#${id}`).val());
+            });
+
+            $.ajax({
+                url: '/predict',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ data: inputFeatures }),
+                success: function (response) {
+                    const predictions = response.prediction[0];
+                    $('#predict-results').html(`
+                        <b>预测结果：</b><br>
+                        Etching Rate (nm/min): ${predictions[0].toFixed(2)}<br>
+                        Angle (°): ${predictions[1].toFixed(2)}
+                    `);
+                },
+                error: function () {
+                    $('#predict-results').text('预测失败！');
+                }
+            });
+        });
+    </script>
+</body>
+</html>
